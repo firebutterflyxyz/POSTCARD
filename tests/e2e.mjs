@@ -16,7 +16,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mpj-'));
 const results = [];
 const ok = (cond, msg) => { if (!cond) throw new Error('驗證失敗：' + msg); results.push('  ✓ ' + msg); };
 
-const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'], env: { ...process.env, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } });
 async function phone(name) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, colorScheme: process.env.COLOR || 'dark', locale: 'zh-TW', acceptDownloads: true });
   await ctx.exposeBinding('__ocrNode', async (_s, b64) => {
@@ -178,6 +178,7 @@ await enterPin(p, '1234');
 await p.click('text=選取');
 for (const n of ['陳怡君', '林建宏', '王美玲']) await p.locator('#card-list .item', { hasText: n }).click();
 await p.locator('.bottombar button', { hasText: '匯出 3 張' }).click();
+await p.locator('.sheet .menu button', { hasText: '名片包' }).click();
 const sumText = await p.locator('.sheet .sumbox').innerText();
 ok(sumText.includes('3 張名片') && sumText.includes('正面 3 張') && !sumText.includes('大頭照'), '送出前顯示張數、分享欄位與照片種類');
 await shot(p, '06-分享名片包');
@@ -224,6 +225,7 @@ await backToList(p);
 await p.click('text=選取');
 for (const n of ['陳怡君', '王美玲']) await p.locator('#card-list .item', { hasText: n }).click();
 await p.locator('.bottombar button', { hasText: '匯出 2 張' }).click();
+await p.locator('.sheet .menu button', { hasText: '名片包' }).click();
 const [dl2] = await Promise.all([p.waitForEvent('download'), sheetBtn(p, '儲存到檔案')]);
 const pack2 = path.join(tmp, 'v2-' + dl2.suggestedFilename()); await dl2.saveAs(pack2);
 
@@ -323,6 +325,54 @@ ok(d6b.includes('A的私人備註') && (await r.locator('.page .thumb img').coun
 await backToList(r);
 await r.locator('.chip', { hasText: '專業顧問' }).click();
 ok((await r.locator('#card-list .item .nm').allInnerTexts()).join() === '林建宏', '還原後依分類篩選正確');
+
+console.log('情境 7（新增）：匯出 Excel、交給 Claude 辨識並匯回結果');
+await tab(p, '名片夾').click();
+await p.click('text=選取');
+for (const n of ['陳怡君', '林建宏']) await p.locator('#card-list .item', { hasText: n }).click();
+await p.locator('.bottombar button', { hasText: '匯出 2 張' }).click();
+await p.locator('.sheet .menu button', { hasText: 'Excel' }).click();
+const [dlx] = await Promise.all([p.waitForEvent('download'), p.locator('.sheet .menu button', { hasText: '儲存到檔案' }).click()]);
+const xlsx = path.join(tmp, dlx.suggestedFilename()); await dlx.saveAs(xlsx);
+const xl = JSON.parse(execFileSync('python3', ['-c', `import openpyxl,json,sys; wb=openpyxl.load_workbook(sys.argv[1]); ws=wb.active; print(json.dumps({"rows":ws.max_row,"imgs":len(ws._images),"head":[c.value for c in ws[1]][:7],"r":[[c.value for c in r] for r in ws.iter_rows(min_row=2)]}, ensure_ascii=False))`, xlsx]).toString());
+ok(dlx.suggestedFilename().endsWith('.xlsx') && xl.rows === 3, 'Excel 匯出選取的 2 張');
+ok(xl.head.join() === '序號,名片正反面,大頭照,分類,來源,備註,姓名', 'Excel 欄位順序正確');
+ok(xl.imgs === 4, 'Excel 內嵌照片：陳怡君正反面＋林建宏正面與大頭照');
+ok(JSON.stringify(xl.r).includes('A的私人備註') && JSON.stringify(xl.r).includes('估價單'), 'Excel 含私人備註與往來紀錄（自己用）');
+fs.copyFileSync(xlsx, path.join(SHOTS, '匯出範例.xlsx'));
+
+await p.click('text=選取');
+await p.locator('#card-list .item', { hasText: '陳怡君' }).click();
+await p.locator('.bottombar button', { hasText: '匯出 1 張' }).click();
+await p.locator('.sheet .menu button', { hasText: 'Claude' }).click();
+await shot(p, '10-交給Claude');
+await sheetBtn(p, '產生 zip');
+await p.waitForSelector('.sheet .menu');
+const [dlz] = await Promise.all([p.waitForEvent('download'), p.locator('.sheet .menu button', { hasText: '儲存到檔案' }).click()]);
+const zpath = path.join(tmp, dlz.suggestedFilename()); await dlz.saveAs(zpath);
+fs.copyFileSync(zpath, path.join(SHOTS, '交給Claude範例.zip'));
+const JSZip = require('jszip');
+const zz = await JSZip.loadAsync(fs.readFileSync(zpath));
+const req = JSON.parse(await zz.file('名片清單.json').async('string'));
+ok(zz.file('照片/001_正面.jpg') && zz.file('照片/001_背面.jpg') && zz.file('給Claude的說明.txt'), 'zip 內有正反面照片、清單與說明');
+// 依說明格式模擬 Claude 回傳的名片包（姓名辨識不同、補上部門）
+const claudePack = { format: 'mingpianjia-pack', version: 1, provider: { name: 'Claude 辨識' }, exportedAt: new Date().toISOString(), included: [], photos: {},
+  cards: [{ id: req.cards[0].id, name: '陳怡', company: '大和物業管理顧問股份有限公司', dept: '工務部', title: '副理',
+    phones: [{ label: '公司', value: '(02) 2700-1234', ext: '306' }, { label: '手機', value: '0912-345-678', ext: '' }, { label: '傳真', value: '(02) 2700-5678', ext: '' }],
+    emails: [{ label: '', value: 'yichun.chen@dahe-pm.com.tw' }], address: '台北市大安區忠孝東路四段100號8樓', website: 'www.dahe-pm.com.tw', lineId: 'yichun.dahe', photos: {} }] };
+const cpath = path.join(tmp, '名片包_Claude辨識.json'); fs.writeFileSync(cpath, JSON.stringify(claudePack));
+await tab(p, '我的').click();
+await withChooser(p, () => p.click('text=匯入名片包'), cpath);
+await p.waitForSelector('.page .imp');
+ok((await p.locator('.page .sumbox').innerText()).includes('Claude 辨識'), '匯入時顯示提供者為 Claude 辨識');
+const nameRow = p.locator('.page table.diff tr', { hasText: '姓名' });
+ok((await nameRow.innerText()).includes('你改過') && await nameRow.locator('input[type=radio]').first().isChecked(), '手動改過的姓名預設保留本機');
+await shot(p, '11-Claude結果匯入');
+await p.locator('.page .bottombar button', { hasText: '匯入所選（1）' }).click();
+await p.waitForSelector('#card-list .item');
+await p.locator('#card-list .item', { hasText: '陳怡君' }).click();
+const d7 = await p.locator('.page').innerText();
+ok(d7.includes('yichun.dahe') && d7.includes('陳怡君'), '採用 Claude 的 LINE ID，姓名維持手動修正');
 
 await browser.close();
 console.log(results.join('\n'));

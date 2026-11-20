@@ -512,6 +512,8 @@ export function mergeIncoming(local, ic, diffs, choices, { provider, importedAt,
   if (Array.isArray(ic.logs)) addLogs(c, ic.logs);
   if (ic.id !== c.id && !c.mergedIds.includes(ic.id)) c.mergedIds = [...(c.mergedIds || []), ic.id];
   c.imports = [...(c.imports || []), { provider, at: importedAt }];
+  for (const df of diffs) if ((choices[df.field] || 'incoming') === 'incoming' && c.review) delete c.review[df.field];
+  if (c.status === 'pending' && (clean(c.name) || clean(c.company))) c.status = 'ok';
   c.updatedAt = nowISO();
   return { card: c, photoTasks };
 }

@@ -198,3 +198,4 @@ details summary { cursor: pointer; font-weight: 700; color: var(--muted); paddin
 .me-list button.danger { color: var(--danger); }
 .cap-empty { padding: 26px 20px; text-align: center; }
 .cap-empty .big-ico { width: 84px; height: 84px; margin: 10px auto 12px; border-radius: 24px; background: var(--brand-soft); color: var(--brand); display: grid; place-items: center; }
+.sheet p { white-space: pre-wrap; }

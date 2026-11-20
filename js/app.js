@@ -3,9 +3,10 @@ import * as C from './core.js';
 import * as DB from './db.js';
 import * as OCR from './ocr.js';
 import * as K from './crypto.js';
+import * as X from './exporters.js';
 import { h, $, put, icon, toast, sheet, confirmBox, menu, promptBox, pickFile, compressImage, zoomImage, fmtDate, today, stamp, safeName, shareOrSave, closeAllSheets } from './ui.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const AUTO_LOCK_MS = 5 * 60 * 1000;
 const S = {
   session: null, gen: 0, cards: new Map(), cats: [], query: '', cat: 'all', sort: 'created',
@@ -242,7 +243,7 @@ function renderList() {
       const n = S.selected.size;
       put(selBar, 
         h('button', { class: 'btn', onclick: () => { const ids = list.map(c => c.id); const allOn = ids.every(i => S.selected.has(i)); ids.forEach(i => allOn ? S.selected.delete(i) : S.selected.add(i)); drawRows(); } }, '全選'),
-        h('button', { class: 'btn primary', disabled: !n, onclick: () => openExport([...S.selected].map(id => S.cards.get(id)).filter(Boolean)) }, `匯出 ${n} 張`));
+        h('button', { class: 'btn primary', disabled: !n, onclick: () => exportMenu([...S.selected].map(id => S.cards.get(id)).filter(Boolean)) }, `匯出 ${n} 張…`));
     }
   }
   function row(c) {
@@ -667,6 +668,68 @@ async function openExport(cards) {
   } catch (e) { toast('匯出失敗：' + e.message); }
 }
 
+// ================= 匯出選單、Excel、交給 Claude =================
+async function exportMenu(cards) {
+  const a = await menu(`匯出 ${cards.length} 張名片`, [
+    { label: '名片包（分享給同事）', value: 'pack' },
+    { label: 'Excel 表格（含名片照片）', value: 'excel' },
+    { label: '交給 Claude 辨識（打包照片）', value: 'claude' },
+  ]);
+  if (a === 'pack') openExport(cards);
+  else if (a === 'excel') exportExcel(cards);
+  else if (a === 'claude') exportForClaude(cards);
+}
+let jszipP = null;
+function loadJSZip() {
+  if (window.JSZip) return Promise.resolve(window.JSZip);
+  jszipP = jszipP || new Promise((res, rej) => {
+    const s = h('script', { src: './js/vendor/jszip.min.js' });
+    s.onload = () => res(window.JSZip); s.onerror = () => { jszipP = null; rej(new Error('無法載入壓縮元件')); };
+    document.head.append(s);
+  });
+  return jszipP;
+}
+async function shrinkPhoto(id, maxW, maxH) {
+  const p = await S.session.getPhoto(id); if (!p) return null;
+  const bmp = await createImageBitmap(new Blob([p.bytes], { type: p.mime }));
+  const s = Math.min(1, maxW / bmp.width, maxH / bmp.height);
+  const cv = h('canvas', { width: Math.round(bmp.width * s), height: Math.round(bmp.height * s) });
+  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+  const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.8));
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), w: cv.width, h: cv.height };
+}
+async function exportExcel(cards) {
+  const how = await menu(`匯出 Excel（${cards.length} 張，含全部欄位與私人備註）`, [{ label: '儲存到檔案', value: 'save' }, { label: '透過分享選單傳送…', value: 'share' }]);
+  if (!how) return;
+  toast('正在產生 Excel…', 8000);
+  try {
+    const JSZip = await loadJSZip();
+    const bytes = await X.buildXlsx(cards, { JSZip, catName: catName, loadImage: shrinkPhoto });
+    const file = new File([bytes], `名片夾_${safeName(S.session.user.name)}_${stamp()}_${cards.length}張.xlsx`, { type: X.EXCEL_MIME });
+    const r = await shareOrSave(file, how);
+    if (r !== 'cancel') { toast('Excel 已' + (r === 'shared' ? '送出' : '儲存：' + file.name), 3500); S.selecting = false; S.selected.clear(); if (!S.pages.length && mainTab === 'list') renderList(); }
+  } catch (e) { toast('Excel 匯出失敗：' + e.message, 4000); }
+}
+async function exportForClaude(cards) {
+  const noPhoto = cards.filter(c => !c.photos?.front && !c.photos?.back).length;
+  const ok = await confirmBox(`交給 Claude 辨識 ${cards.length - noPhoto} 張`,
+    `會產生一個 zip，內含名片正反面照片、名片清單與給 Claude 的說明。${noPhoto ? `（${noPhoto} 張沒有名片照片，會略過）` : ''}\n\n接下來：\n1. 把 zip 傳到 Claude 對話，說「請照說明辨識」\n2. 下載 Claude 回給你的名片包 .json\n3. 我的 → 匯入名片包，核對差異後匯入\n\n注意：照片會上傳到 Claude（Anthropic）。`, '產生 zip');
+  if (!ok) return;
+  try {
+    const JSZip = await loadJSZip();
+    const list = cards.filter(c => c.photos?.front || c.photos?.back);
+    const bytes = await X.buildClaudeZip(list, { JSZip, provider: S.session.user.name, dateStr: stamp(), loadPhoto: id => S.session.getPhoto(id) });
+    const file = new File([bytes], `交給Claude辨識_${stamp()}_${list.length}張.zip`, { type: 'application/zip' });
+    const how = await menu('zip 已產生', [{ label: '儲存到檔案', value: 'save' }, { label: '透過分享選單傳送…', value: 'share' }]);
+    if (!how) return;
+    const r = await shareOrSave(file, how);
+    if (r !== 'cancel') { toast('已產生：' + file.name, 3500); S.selecting = false; S.selected.clear(); if (!S.pages.length && mainTab === 'list') renderList(); }
+  } catch (e) { toast('產生失敗：' + e.message, 4000); }
+}
+function claudeHelp() {
+  return confirmBox('交給 Claude 大量辨識', '1. 名片夾 → 右上「選取」→ 勾選名片（可先點「待整理」篩選）\n2. 下方「匯出…」→「交給 Claude 辨識」，存下 zip\n3. 把 zip 傳到 Claude 對話，說「請照說明辨識」\n4. 下載 Claude 回的名片包 .json\n5. 我的 → 匯入名片包 → 核對新舊差異 → 匯入\n\n你手動改過的欄位，預設保留你的版本。', '知道了');
+}
+
 // ================= 匯入名片包 =================
 async function importFromFile(file) {
   let pack;
@@ -681,7 +744,8 @@ function openImportPreview(pack, an, hashes) {
   const choices = new Map(); // item -> {field: 'local'|'incoming'}
   for (const it of an.items) {
     const ch = {};
-    for (const d of it.diffs) ch[d.field] = it.status === 'exists' ? 'incoming' : (d.local && !String(d.local).startsWith('（無') ? 'local' : 'incoming');
+    const localHas = d => d.local && !String(d.local).startsWith('（無');
+    for (const d of it.diffs) ch[d.field] = it.status === 'exists' ? (it.local.manual?.[d.field] && localHas(d) ? 'local' : 'incoming') : (localHas(d) ? 'local' : 'incoming');
     choices.set(it, ch);
   }
   const listEl = h('div');
@@ -714,7 +778,7 @@ function openImportPreview(pack, an, hashes) {
         const isPhoto = ['front', 'back', 'avatar'].includes(d.field);
         const cell = side => h('td', {}, h('label', {}, h('input', { type: 'radio', name: nm + d.field, checked: ch[d.field] === side, onchange: () => { ch[d.field] = side; } }),
           isPhoto ? photoCell(it, d, side) : h('span', {}, d[side] || '（空白）')));
-        return h('tr', {}, h('th', {}, C.FIELD_LABELS[d.field]), cell('local'), cell('incoming'));
+        return h('tr', {}, h('th', {}, C.FIELD_LABELS[d.field], it.local?.manual?.[d.field] ? h('div', { class: 'small muted' }, '你改過') : null), cell('local'), cell('incoming'));
       })),
       it.extra?.logs ? h('caption', { style: { captionSide: 'bottom', textAlign: 'left', fontSize: '13px', paddingTop: '4px' } }, `另會加入 ${it.extra.logs} 筆往來紀錄`) : null);
   }
@@ -733,7 +797,7 @@ function openImportPreview(pack, an, hashes) {
         extra = h('div', {}, seg([['merge', '更新'], ['skip', '略過']]), it.action === 'merge' && it.selected ? diffTable(it) : null);
       }
       return h('div', { class: 'imp', 'data-status': it.status },
-        h('label', { class: 'hd' }, cb, h('span', { style: { flex: 1 } }, h('b', {}, ic.name || ic.company || '（未命名）'), badge,
+        h('label', { class: 'hd' }, cb, h('span', { style: { flex: 1 } }, h('b', {}, (it.status === 'exists' ? it.local.name || it.local.company : '') || ic.name || ic.company || '（未命名）'), badge,
           h('div', { class: 'small muted' }, [ic.name ? ic.company : '', ic.title].filter(Boolean).join('・')))), extra);
     }));
     const n = an.items.filter(i => i.selected && !isNoop(i) && i.action !== 'skip').length;
@@ -801,7 +865,9 @@ function renderMe() {
       item('切換使用者', null, () => { clearSession(); showLogin('__list__'); })),
     h('div', { class: 'section me-list' }, h('h2', {}, '名片'),
       item('分類管理', `${S.cats.length} 個`, openCategories),
-      item('匯入名片包', null, async () => { const f = await pickFile({ accept: '.json,application/json,text/plain,*/*' }); if (f) importFromFile(f); })),
+      item('匯入名片包', '含 Claude 辨識結果', async () => { const f = await pickFile({ accept: '.json,application/json,text/plain,*/*' }); if (f) importFromFile(f); }),
+      item('匯出 Excel（全部名片）', `${n} 張`, () => n ? exportExcel(C.filterCards([...S.cards.values()], { sort: S.sort }, catsById())) : toast('還沒有名片')),
+      item('交給 Claude 辨識', '選取名片後使用', () => claudeHelp())),
     h('div', { class: 'section me-list' }, h('h2', {}, '完整備份（換手機用）'),
       item('建立完整備份', null, makeBackup),
       item('從備份還原', null, restoreBackup)),

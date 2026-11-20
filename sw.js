@@ -1,8 +1,8 @@
 // 名片夾 Service Worker：離線快取、Android 分享名片包到 App
-const VERSION = 'mpj-v1.0.0';
+const VERSION = 'mpj-v1.1.0';
 const SHELL = [
   './', './index.html', './css/app.css', './manifest.webmanifest',
-  './js/app.js', './js/core.js', './js/crypto.js', './js/db.js', './js/ocr.js', './js/ui.js',
+  './js/app.js', './js/core.js', './js/exporters.js', './js/vendor/jszip.min.js', './js/crypto.js', './js/db.js', './js/ocr.js', './js/ui.js',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png',
   './tessdata/chi_tra.traineddata.gz', './tessdata/eng.traineddata.gz',
 ];
