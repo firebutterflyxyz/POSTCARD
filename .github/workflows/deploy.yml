@@ -1,0 +1,52 @@
+name: 部署名片夾到 GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 核心邏輯單元測試
+        run: node --test tests/core.test.mjs
+
+      - name: 下載離線辨識元件
+        run: |
+          mkdir -p /tmp/t && cd /tmp/t
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund tesseract.js@5 tesseract.js-core@5
+          mkdir -p "$GITHUB_WORKSPACE/_site/vendor/tesseract" "$GITHUB_WORKSPACE/_site/vendor/tesseract-core"
+          cp node_modules/tesseract.js/dist/tesseract.min.js node_modules/tesseract.js/dist/worker.min.js "$GITHUB_WORKSPACE/_site/vendor/tesseract/"
+          cp node_modules/tesseract.js-core/tesseract-core*.wasm.js "$GITHUB_WORKSPACE/_site/vendor/tesseract-core/"
+
+      - name: 組合網站檔案
+        run: cp -r index.html sw.js manifest.webmanifest css js icons tessdata _site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
